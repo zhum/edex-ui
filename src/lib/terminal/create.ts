@@ -5,7 +5,12 @@ import { ImageAddon } from '@xterm/addon-image';
 import { SearchAddon } from '@xterm/addon-search';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { WebLinksAddon } from '@xterm/addon-web-links';
-import { WebglAddon } from '@xterm/addon-webgl';
+// NOTE: xterm's WebGL renderer (@xterm/addon-webgl) is intentionally NOT used.
+// Tauri's Linux webview (WebKitGTK) does not present a second WebGL context
+// reliably alongside the globe's Three.js context: terminal output rendered to
+// the WebGL canvas only painted on the next input event, making each keystroke's
+// effect appear one keystroke late. xterm's default DOM renderer repaints
+// correctly and is noticeably lower-latency here. Do not re-add WebglAddon.
 import { type ITerminalInitOnlyOptions, Terminal } from '@xterm/xterm';
 import { warnLog } from '@/lib/log';
 import type { Theme } from '@/lib/themes';
@@ -90,12 +95,7 @@ export async function createTerminal(
 		},
 	});
 
-	try {
-		const webglAddon = new WebglAddon();
-		term.loadAddon(webglAddon);
-	} catch (e) {
-		await warnLog(`WebGL not supported, falling back to canvas. Error: ${e}`);
-	}
+	// WebGL renderer deliberately omitted — see note at the WebglAddon import.
 
 	try {
 		const imageAddon = new ImageAddon({

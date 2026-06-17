@@ -260,9 +260,34 @@ function Session({ id, active, onActivity }: SessionProps) {
 	const OSC_133_C_BEL = '\x1b]133;C\x07';
 	const OSC_133_C_ST = '\x1b]133;C\x1b\\';
 
-	// Batch PTY output via RAF — reduces xterm.js write() calls during output floods
+	// Batch PTY output to reduce xterm.js write() calls during output floods.
+	// We schedule the flush via BOTH requestAnimationFrame and a setTimeout
+	// fallback: WebKitGTK (Tauri's Linux webview) throttles RAF callbacks when
+	// the page is otherwise idle, so RAF alone would stall buffered output until
+	// the next input event woke the compositor — making each keystroke's output
+	// in interactive apps (vim, top) appear only after the *next* keystroke.
+	// The setTimeout fires reliably even when idle; whichever runs first flushes.
 	let pendingData = '';
-	let rafScheduled = false;
+	let flushScheduled = false;
+	let rafId = 0;
+	let timeoutId: ReturnType<typeof setTimeout> | undefined;
+
+	function flush() {
+		flushScheduled = false;
+		if (rafId) {
+			cancelAnimationFrame(rafId);
+			rafId = 0;
+		}
+		if (timeoutId !== undefined) {
+			clearTimeout(timeoutId);
+			timeoutId = undefined;
+		}
+		if (pendingData) {
+			terminal?.term.write(pendingData);
+			pendingData = '';
+		}
+	}
+
 	const unListen = listen(`data-${id}`, (e: Event<string>) => {
 		const payload = e.payload;
 
@@ -275,15 +300,10 @@ function Session({ id, active, onActivity }: SessionProps) {
 		}
 
 		pendingData += payload;
-		if (!rafScheduled) {
-			rafScheduled = true;
-			requestAnimationFrame(() => {
-				if (pendingData) {
-					terminal?.term.write(pendingData);
-					pendingData = '';
-				}
-				rafScheduled = false;
-			});
+		if (!flushScheduled) {
+			flushScheduled = true;
+			rafId = requestAnimationFrame(flush);
+			timeoutId = setTimeout(flush, 8);
 		}
 		if (active() !== id && onActivity) {
 			onActivity(id);
@@ -345,6 +365,8 @@ function Session({ id, active, onActivity }: SessionProps) {
 	});
 
 	onCleanup(() => {
+		if (rafId) cancelAnimationFrame(rafId);
+		if (timeoutId !== undefined) clearTimeout(timeoutId);
 		terminal?.term.dispose();
 		unListen.then(f => f()).catch(errorLog);
 		controller.abort();

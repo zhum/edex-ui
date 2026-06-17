@@ -24,6 +24,7 @@ mod event;
 mod file;
 mod session;
 mod sys;
+mod theme;
 
 #[tauri::command]
 async fn kernel_version() -> Result<String, String> {
@@ -133,7 +134,7 @@ fn main() {
                 warn!("Single instance callback: main window not found");
             }
         }))
-        .invoke_handler(tauri::generate_handler![kernel_version, read_history, has_running_children, write_to_session])
+        .invoke_handler(tauri::generate_handler![kernel_version, read_history, has_running_children, write_to_session, theme::get_os_theme, theme::get_recommended_theme])
         .setup(move |app| {
             let session_pids = SessionPids::default();
             let session_writers = SessionWriters::default();
@@ -175,6 +176,9 @@ fn main() {
                 process_event_sender.clone(),
             );
             tauri::async_runtime::spawn(async move { connection_monitor.run().await });
+
+            // monitor OS theme changes and emit events to frontend
+            theme::start_theme_monitor(app.handle().clone());
             Ok(())
         })
         .run(tauri::generate_context!())

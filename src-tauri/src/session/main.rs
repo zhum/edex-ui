@@ -4,14 +4,10 @@ use dashmap::DashMap;
 use log::{error, warn};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use serde::{Deserialize, Serialize};
-use std::io::{BufRead, BufReader, Write};
+use std::io::Write;
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Listener};
 use tokio::sync::mpsc;
-
-/// Larger BufReader buffer for PTY output — reduces syscall frequency.
-/// Default is 8KB; 64KB lets us read larger chunks before emitting.
-const PTY_READ_BUFFER_SIZE: usize = 64 * 1024;
 
 /// Shared writer state so Tauri commands can write directly to PTY sessions
 /// without going through the event system + JSON deserialization.
@@ -154,31 +150,29 @@ impl PtySession {
         })?;
 
         // Get reader and writer from master
-        let pty_reader = master.try_clone_reader()?;
-        let mut reader = BufReader::with_capacity(PTY_READ_BUFFER_SIZE, pty_reader);
+        let mut pty_reader = master.try_clone_reader()?;
         let writer = master.take_writer()?;
 
         // PTY reader emits directly to frontend — bypasses the shared event channel
         // so terminal output is never queued behind system monitor events.
         let app_handle_for_reader = app_handle.clone();
         let id_for_reader = id.to_owned();
+        let mut buffer = [0u8; 8192];
 
         let reader_handle = tauri::async_runtime::spawn_blocking(move || {
             // Pre-compute event name once (avoids format!() allocation per read)
             let event_name = format!("data-{}", id_for_reader);
             loop {
-                match reader.fill_buf() {
-                    Ok(data) if !data.is_empty() => {
+                match pty_reader.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(n) => {
                         // Emit as string — avoids serde serializing bytes as JSON number array
                         // ([72,101,108,...] → "Hello..."). Terminal output is text/escape sequences.
-                        let text = String::from_utf8_lossy(data).into_owned();
-                        let len = data.len();
-                        reader.consume(len);
+                        let text = String::from_utf8_lossy(&buffer[..n]).into_owned();
                         if let Err(e) = app_handle_for_reader.emit(&event_name, &text) {
                             error!("Failed to emit PTY data for {}: {}", id_for_reader, e);
                         }
                     }
-                    Ok(_) => break, // EOF
                     Err(e) => {
                         error!(
                             "Error when reading from pty for session {}: Error: {}",
@@ -189,7 +183,6 @@ impl PtySession {
                 }
             }
         });
-
         // Store writer in shared state so the Tauri command can write directly
         // (bypasses event system + JSON deserialization for every keystroke)
         let writer = Arc::new(Mutex::new(
